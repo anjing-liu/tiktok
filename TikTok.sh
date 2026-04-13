@@ -1,202 +1,153 @@
-#!/bin/bash
+import requests
+import argparse
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse
 
-# TikTok IP 环境全面检测脚本 v4.0 (五步法)
-# 依赖: curl, dig, whois, bc, jq (可选)
+def get_public_ip(proxies=None):
+    """获取当前出口IP"""
+    try:
+        r = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=10)
+        return r.json()["ip"]
+    except:
+        return None
 
-set -e
+def get_ip_info(ip, proxies=None):
+    """ip-api.com 多维度信息（免费、无key）"""
+    url = f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,isp,org,as,proxy,hosting,mobile,query"
+    try:
+        r = requests.get(url, proxies=proxies, timeout=10)
+        return r.json()
+    except:
+        return {"status": "fail", "message": "请求失败"}
 
-# 颜色
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+def test_latency(proxies=None):
+    """简单延迟测试（tiktok.com）"""
+    start = time.time()
+    try:
+        r = requests.get("https://www.tiktok.com", proxies=proxies, timeout=8)
+        latency = round((time.time() - start) * 1000)
+        return latency if r.status_code == 200 else 9999
+    except:
+        return 9999
 
-# 临时文件
-TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
+def test_tiktok_access(proxies=None):
+    """TikTok首页连通性测试"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get("https://www.tiktok.com", headers=headers, proxies=proxies, timeout=10, allow_redirects=True)
+        if r.status_code == 200 and "tiktok.com" in r.url and len(r.text) > 10000:
+            return "✅ 正常访问", True
+        elif r.status_code == 403 or r.status_code == 429:
+            return f"❌ 被限流/封锁 (状态码 {r.status_code})", False
+        else:
+            return f"⚠️ 异常 (状态码 {r.status_code})", False
+    except Exception as e:
+        return f"❌ 连接失败: {str(e)[:80]}", False
 
-echo ""
-echo "=========================================="
-echo "   TikTok IP 环境全面检测 v4.0"
-echo "=========================================="
-echo ""
+def main():
+    parser = argparse.ArgumentParser(description="TikTok IP 多维度测试脚本（运营 vs 观看）")
+    parser.add_argument("--proxy", help="代理地址，例如 http://user:pass@ip:port 或 socks5://ip:port")
+    parser.add_argument("--target", default="US", help="目标国家代码（如 US、GB、JP），默认 US")
+    args = parser.parse_args()
 
-# 1. 获取本机公网 IP
-MY_IP=$(curl -s ifconfig.me)
-echo -e "${BLUE}[1/5] 本机 IP: ${GREEN}$MY_IP${NC}"
+    proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
+    if args.proxy and args.proxy.startswith("socks"):
+        proxies = {"http": args.proxy, "https": args.proxy}
 
-# 2. IP 类型检测（使用 ip-api.com 和 ipinfo.io 交叉验证）
-echo -e "${BLUE}[2/5] IP 类型与信誉检测...${NC}"
-IPAPI_DATA=$(curl -s "http://ip-api.com/json/${MY_IP}?fields=status,message,isp,org,as,proxy,hosting,mobile,query")
-if echo "$IPAPI_DATA" | grep -q '"status":"success"'; then
-    HOSTING=$(echo "$IPAPI_DATA" | grep -o '"hosting":[^,]*' | cut -d':' -f2 | tr -d ' ')
-    PROXY=$(echo "$IPAPI_DATA" | grep -o '"proxy":[^,]*' | cut -d':' -f2 | tr -d ' ')
-    ISP=$(echo "$IPAPI_DATA" | grep -o '"isp":"[^"]*"' | cut -d'"' -f4)
-    AS=$(echo "$IPAPI_DATA" | grep -o '"as":"[^"]*"' | cut -d'"' -f4)
-    echo -e "   ISP: $ISP"
-    echo -e "   AS: $AS"
-    if [ "$HOSTING" = "true" ]; then
-        echo -e "   ${RED}⚠️  ip-api.com 标记为 hosting (数据中心/云)${NC}"
-        HOSTING_FLAG=1
-    else
-        echo -e "   ${GREEN}✅ ip-api.com 标记为非 hosting${NC}"
-        HOSTING_FLAG=0
-    fi
-    if [ "$PROXY" = "true" ]; then
-        echo -e "   ${RED}⚠️  标记为 proxy/VPN${NC}"
-        PROXY_FLAG=1
-    else
-        PROXY_FLAG=0
-    fi
-else
-    echo -e "   ${YELLOW}⚠️  ip-api.com 查询失败${NC}"
-    HOSTING_FLAG=-1
-    PROXY_FLAG=-1
-fi
+    print("🔍 TikTok IP 测试开始...\n")
 
-# 补充 ipinfo.io 数据
-IPINFO_DATA=$(curl -s "https://ipinfo.io/${MY_IP}/json")
-COUNTRY=$(echo "$IPINFO_DATA" | grep -o '"country":"[^"]*"' | cut -d'"' -f4)
-CITY=$(echo "$IPINFO_DATA" | grep -o '"city":"[^"]*"' | cut -d'"' -f4)
-TIMEZONE=$(echo "$IPINFO_DATA" | grep -o '"timezone":"[^"]*"' | cut -d'"' -f4)
-ORG=$(echo "$IPINFO_DATA" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
-echo -e "   国家: $COUNTRY, 城市: $CITY"
-echo -e "   时区: $TIMEZONE"
-echo -e "   org: $ORG"
+    # 1. 获取出口IP
+    public_ip = get_public_ip(proxies)
+    if not public_ip:
+        print("❌ 无法获取出口IP，请检查代理是否可用")
+        sys.exit(1)
+    print(f"📍 出口IP: {public_ip}")
 
-# 3. 环境一致性检测（系统时区 vs IP 时区）
-echo -e "${BLUE}[3/5] 环境一致性检测...${NC}"
-SYS_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || date +%Z)
-if [ -n "$TIMEZONE" ]; then
-    if echo "$SYS_TZ" | grep -qiE "$(echo "$TIMEZONE" | sed 's/\/.*//')"; then
-        echo -e "   ${GREEN}✅ 系统时区 ($SYS_TZ) 与 IP 时区 ($TIMEZONE) 大致匹配${NC}"
-        TZ_MATCH=1
-    else
-        echo -e "   ${YELLOW}⚠️  系统时区 ($SYS_TZ) 与 IP 时区 ($TIMEZONE) 不匹配，建议调整${NC}"
-        TZ_MATCH=0
-    fi
-else
-    TZ_MATCH=-1
-fi
+    # 2. IP详细信息
+    info = get_ip_info(public_ip, proxies)
+    if info.get("status") != "success":
+        print(f"❌ IP信息查询失败: {info.get('message', '未知错误')}")
+        sys.exit(1)
 
-# 4. IP 稳定性与黑名单检测
-echo -e "${BLUE}[4/5] IP 稳定性与黑名单检测...${NC}"
-echo -n "   25 端口状态: "
-if timeout 3 nc -zv "$MY_IP" 25 2>&1 | grep -q "open"; then
-    echo -e "${RED}开放 (风险较高)${NC}"
-    PORT25_OPEN=1
-else
-    echo -e "${GREEN}关闭 (正常)${NC}"
-    PORT25_OPEN=0
-fi
+    country = info.get("countryCode", "未知")
+    city = info.get("city", "未知")
+    isp = info.get("isp", "未知")
+    is_proxy = info.get("proxy", False)
+    is_hosting = info.get("hosting", False)
+    is_mobile = info.get("mobile", False)
 
-# 简单黑名单检测 (spamhaus)
-echo -n "   Spamhaus 黑名单: "
-REVERSE_IP=$(echo "$MY_IP" | awk -F. '{print $4"."$3"."$2"."$1}')
-if dig +short "$REVERSE_IP.zen.spamhaus.org" | grep -q "127.0.0"; then
-    echo -e "${RED}被列入 (高风险)${NC}"
-    BLACKLISTED=1
-else
-    echo -e "${GREEN}干净 (正常)${NC}"
-    BLACKLISTED=0
-fi
+    print(f"🌍 地区: {info.get('country')} ({country}) - {city}")
+    print(f"🏢 ISP: {isp}")
+    print(f"📡 类型: {'移动网络' if is_mobile else '住宅/ISP' if not is_hosting and not is_proxy else '数据中心/代理'}")
+    print(f"🚩 代理检测: {'是' if is_proxy else '否'}")
+    print(f"🖥️  Hosting检测: {'是' if is_hosting else '否'}")
 
-# 5. TikTok 接口与页面活跃度测试
-echo -e "${BLUE}[5/5] TikTok 接口活跃度测试...${NC}"
-UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-COOKIE_JAR=$(mktemp)
+    # 3. 延迟
+    latency = test_latency(proxies)
+    print(f"⚡ TikTok延迟: {latency}ms {'✅ 优秀' if latency < 150 else '⚠️ 一般' if latency < 300 else '❌ 较高'}")
 
-# 访问首页获取 cookie
-curl -s -c "$COOKIE_JAR" -b "$COOKIE_JAR" "https://www.tiktok.com/" -H "User-Agent: $UA" >/dev/null
+    # 4. TikTok访问测试
+    access_status, access_ok = test_tiktok_access(proxies)
+    print(f"🔗 TikTok访问: {access_status}")
 
-# 测试推荐接口
-RECOMMEND=$(curl -s -b "$COOKIE_JAR" "https://www.tiktok.com/api/recommend/item_list/?aid=1988&count=5" -H "User-Agent: $UA" -H "Referer: https://www.tiktok.com/")
-VIDEO_COUNT=$(echo "$RECOMMEND" | grep -o '"id":"[0-9]*"' | wc -l)
-if [ "$VIDEO_COUNT" -gt 0 ]; then
-    echo -e "   ${GREEN}✅ 获取到 $VIDEO_COUNT 个推荐视频${NC}"
-    RECOMMEND_OK=1
-else
-    echo -e "   ${YELLOW}⚠️  未获取到推荐视频${NC}"
-    RECOMMEND_OK=0
-fi
+    # 5. 多维度打分 & 结论
+    score = 0
+    reasons = []
 
-# 测试页面内容完整性
-HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}\n" "https://www.tiktok.com/" -H "User-Agent: $UA")
-if [ "$HTTP_CODE" = "200" ]; then
-    PAGE_CONTENT=$(curl -s -L "https://www.tiktok.com/" -H "User-Agent: $UA")
-    if echo "$PAGE_CONTENT" | grep -q "__UNIVERSAL_DATA_FOR_REHYDRATION__"; then
-        echo -e "   ${GREEN}✅ 页面包含 TikTok 核心数据${NC}"
-        PAGE_OK=2
-    elif echo "$PAGE_CONTENT" | grep -qi "captcha\|verify"; then
-        echo -e "   ${YELLOW}⚠️  页面可能触发验证${NC}"
-        PAGE_OK=1
-    else
-        echo -e "   ${RED}❌ 页面内容异常${NC}"
-        PAGE_OK=0
-    fi
-else
-    echo -e "   ${RED}❌ HTTP 状态码异常: $HTTP_CODE${NC}"
-    PAGE_OK=0
-fi
+    if country == args.target:
+        score += 30
+        reasons.append("✅ 地区匹配目标国家")
+    else:
+        reasons.append(f"⚠️ 地区不匹配（当前{country}，目标{args.target}）")
 
-rm -f "$COOKIE_JAR"
+    if not is_proxy and not is_hosting:
+        score += 40
+        reasons.append("✅ 纯住宅/ISP属性（运营推荐）")
+    elif is_mobile:
+        score += 25
+        reasons.append("✅ 移动IP（TikTok友好，但稳定性稍差）")
+    else:
+        reasons.append("❌ 数据中心或已知代理（运营高风险）")
 
-# 综合评分
-SCORE=0
-# IP 类型
-if [ "$HOSTING_FLAG" = "0" ] && [ "$PROXY_FLAG" = "0" ]; then
-    SCORE=$((SCORE+30))
-elif [ "$HOSTING_FLAG" = "1" ]; then
-    SCORE=$((SCORE-30))
-elif [ "$PROXY_FLAG" = "1" ]; then
-    SCORE=$((SCORE-50))
-fi
-# 时区匹配
-[ "$TZ_MATCH" = "1" ] && SCORE=$((SCORE+20)) || SCORE=$((SCORE-10))
-# 黑名单
-[ "$BLACKLISTED" = "0" ] && SCORE=$((SCORE+20)) || SCORE=$((SCORE-30))
-# 端口 25
-[ "$PORT25_OPEN" = "0" ] && SCORE=$((SCORE+10)) || SCORE=$((SCORE-10))
-# TikTok 接口和页面
-[ "$RECOMMEND_OK" = "1" ] && SCORE=$((SCORE+10))
-case $PAGE_OK in
-    2) SCORE=$((SCORE+20)) ;;
-    1) SCORE=$((SCORE-10)) ;;
-    0) SCORE=$((SCORE-30)) ;;
-esac
+    if latency < 200:
+        score += 15
+    elif latency < 350:
+        score += 5
 
-echo ""
-echo "=========================================="
-echo -e "${BLUE}           检测结论${NC}"
-echo "=========================================="
+    if access_ok:
+        score += 15
+        reasons.append("✅ TikTok连通正常")
+    else:
+        reasons.append("❌ TikTok访问异常")
 
-if [ $SCORE -ge 80 ]; then
-    echo -e "${GREEN}⭐⭐⭐⭐⭐ 顶级家宽 IP${NC}"
-    echo -e "✅ 完全适合 TikTok 重度运营（注册、发视频、直播、矩阵）"
-elif [ $SCORE -ge 50 ]; then
-    echo -e "${GREEN}⭐⭐⭐⭐ 良好住宅/商业 IP${NC}"
-    echo -e "✅ 适合日常运营（登录、互动、少量发视频）"
-elif [ $SCORE -ge 20 ]; then
-    echo -e "${YELLOW}⭐⭐⭐ 混合型 IP（小型 ISP 或企业宽带）${NC}"
-    echo -e "⚠️ 适合观看和基础互动，不建议批量运营"
-elif [ $SCORE -ge -20 ]; then
-    echo -e "${RED}⭐⭐ 数据中心 / 云 VPS IP${NC}"
-    echo -e "❌ 仅适合浏览，登录和发视频极易触发验证"
-else
-    echo -e "${RED}⭐ 高风险 IP（代理/黑名单）${NC}"
-    echo -e "❌ 强烈不建议用于任何 TikTok 操作"
-fi
+    print("\n" + "="*60)
+    print("🎯 测试结论")
+    print("="*60)
+    for r in reasons:
+        print(r)
 
-echo ""
-echo "评分详情: ${SCORE} 分"
-echo "  - IP 类型: $([ "$HOSTING_FLAG" = "0" ] && [ "$PROXY_FLAG" = "0" ] && echo "家宽/住宅级" || echo "数据中心/代理")"
-echo "  - 时区匹配: $([ "$TZ_MATCH" = "1" ] && echo "匹配" || echo "不匹配/未知")"
-echo "  - 黑名单: $([ "$BLACKLISTED" = "0" ] && echo "干净" || echo "被列入")"
-echo "  - 25 端口: $([ "$PORT25_OPEN" = "0" ] && echo "关闭" || echo "开放")"
-echo "  - 推荐接口: $([ "$RECOMMEND_OK" = "1" ] && echo "活跃" || echo "不活跃")"
-echo "  - 页面状态: $([ "$PAGE_OK" -eq 2 ] && echo "正常" || ([ "$PAGE_OK" -eq 1 ] && echo "触发验证" || echo "异常"))"
-echo ""
-echo "=========================================="
-echo "检测完成时间: $(date)"
-echo "=========================================="
+    if score >= 80:
+        print("\n🚀 **极适合运营**（多账号养号/直播/批量发视频）")
+        print("   建议搭配指纹浏览器使用，单IP单号长期稳定")
+    elif score >= 60:
+        print("\n⚠️ **适合观看 + 轻度运营**（单号刷视频、偶尔发内容）")
+        print("   运营风险中等，建议先小号测试")
+    elif score >= 40:
+        print("\n📺 **仅适合观看**（刷视频正常，但运营容易被风控）")
+    else:
+        print("\n❌ **不推荐使用**（观看都可能卡顿/限流）")
+
+    print(f"\n综合分数: {score}/100")
+    print("\n💡 额外建议（强烈推荐手动补充）:")
+    print("   1. whoer.net 或 scamalytics.com 检查欺诈分数（<30分才干净）")
+    print("   2. f.vision 综合指纹检测")
+    print("   3. VPS用户可运行流媒体解锁脚本：")
+    print("      bash <(wget -qO- https://down.vpsaff.net/linux/speedtest/superbench.sh) -f")
+    print("   4. 运营一定要用**静态住宅IP**，动态IP容易被关联封号")
+
+if __name__ == "__main__":
+    main()
